@@ -3,39 +3,523 @@
  *
  * This program implements a multithreaded HTTP proxy.
  *
- * <Replace with your name(s) and NetID(s).>
- */ 
+ * <Yuewei Zhou yz162; Yingtong Zhou, yz178>
+ */
 
 #include <assert.h>
+#include <stdbool.h>
+#include <sys/socket.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #include "csapp.h"
 
-static void	client_error(int fd, const char *cause, int err_num, 
-		    const char *short_msg, const char *long_msg);
-static char    *create_log_entry(const struct sockaddr_in *sockaddr,
-		    const char *uri, int size);
-static int	parse_uri(const char *uri, char **hostnamep, char **portp,
-		    char **pathnamep);
+// #define MAXLINE 10
+#define NITEMS 20
+#define NTHREADS 10
 
-/* 
+/*
+ * The struct information about a connected client.
+ */
+typedef struct
+{
+	struct sockaddr_in addr; // Socket address
+	socklen_t addrlen;	 // address length
+	int connfd;		 // Client connection file descriptor
+	FILE *logger;		 // File logger
+	char *port;		 // Port number
+} client_info;
+
+client_info *buffer[NITEMS];
+int shared_cnt;
+pthread_mutex_t mutex;
+pthread_cond_t cond_empty;
+pthread_cond_t cond_full;
+unsigned int prod_index = 0;
+unsigned int cons_index = 0;
+
+static void client_error(int fd, const char *cause, int err_num,
+    const char *short_msg, const char *long_msg);
+static char *create_log_entry(const struct sockaddr_in *sockaddr,
+    const char *uri, int size);
+static int parse_uri(const char *uri, char **hostnamep, char **portp,
+    char **pathnamep);
+static int rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize);
+void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger);
+void *consumer(void *arg);
+
+/*
  * Requires:
- *   <to be filled in by the student(s)> 
+ *	 A port number is required for the proxy to start listening.
  *
  * Effects:
- *   <to be filled in by the student(s)> 
+ *   The program serves as a proxy for GET requests.
  */
-int
-main(int argc, char **argv)
+int main(int argc, char **argv)
 {
-
 	/* Check the arguments. */
-	if (argc != 2) {
+	if (argc != 2)
+	{
 		fprintf(stderr, "Usage: %s <port number>\n", argv[0]);
 		exit(0);
 	}
 
+	// Ignore broken pipe signals.
+	Signal(SIGPIPE, SIG_IGN);
+
+	int i;
+	// pthread_t prod_tid;
+	pthread_t cons_tids[NTHREADS];
+
+	int listenfd = open_listenfd(argv[1]);
+	if (listenfd < 0)
+	{
+		unix_error("open_listen error");
+		return (-1);
+	}
+
+	/* Initialize pthread variables. */
+	Pthread_mutex_init(&mutex, NULL);
+
+	/* INITIALIZE THE CONDITION VARIABLES HERE. */
+	pthread_cond_init(&cond_empty, NULL);
+	pthread_cond_init(&cond_full, NULL);
+
+	/* Start producer and consumer threads. */
+	for (i = 0; i < NTHREADS; ++i)
+	{
+		Pthread_create(&cons_tids[i], NULL, consumer, NULL);
+	}
+
+	FILE *logger = fopen("proxy.log", "a+");
+
+	while (true)
+	{
+		struct sockaddr_in clientaddr;
+		socklen_t clientlen = sizeof(clientaddr);
+		// better to use sizeof struct sockaddr_in?
+
+		int connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+		if (connfd == -1)
+		{
+			fprintf(stderr, "Accept() error\n");
+			continue;
+		}
+
+		// Allocate struct to pass into thread
+		client_info *info = malloc(sizeof(client_info));
+		if (info == NULL)
+		{
+			fprintf(stderr, "Malloc failed!\n");
+			Free(info);
+			exit(1);
+		}
+		info->addr = clientaddr;
+		info->addrlen = clientlen;
+		info->connfd = connfd;
+		info->port = argv[1];
+		info->logger = logger;
+
+		/* Push info into the buffer */
+		Pthread_mutex_lock(&mutex);
+		while (shared_cnt == NITEMS)
+		{
+			/*Wait for signals from cond_empty.*/
+			Pthread_cond_wait(&cond_empty, &mutex);
+		}
+		buffer[prod_index] = info;
+		shared_cnt++;
+		Pthread_cond_signal(&cond_full);
+
+		/* Update producer index. */
+		if (prod_index == NITEMS - 1)
+			prod_index = 0;
+		else
+			prod_index++;
+
+		/* Release mutex lock. */
+		Pthread_mutex_unlock(&mutex);
+	}
+
+	/* Wait for threads to finish. */
+	for (i = 0; i < NTHREADS; ++i)
+	{
+		Pthread_join(cons_tids[i], NULL);
+	}
+
+	/* Clean up. */
+	Pthread_mutex_destroy(&mutex);
+
+	/* DESTROY THE CONDITION VARIABLES HERE. */
+	Pthread_cond_destroy(&cond_empty);
+	Pthread_cond_destroy(&cond_full);
+
+	/*Close the logger file*/
+	Fclose(logger);
+
 	/* Return success. */
 	return (0);
+}
+
+/*
+ * Requires:
+ *    None.
+ * Effects:
+ *     Read and process a client info from the buffer.
+ */
+void *consumer(void *arg)
+{
+	/*Detach the thread.*/
+	Pthread_detach(Pthread_self());
+	client_info *info;
+	int id = (int)Pthread_self();
+	printf("Started consumer %d\n", id);
+
+	while (true)
+	{
+		Pthread_mutex_lock(&mutex);
+
+		while (shared_cnt == 0)
+		{
+			Pthread_cond_wait(&cond_full, &mutex);
+		}
+		/* Read from buffer */
+		info = buffer[cons_index];
+		shared_cnt--;
+		if (shared_cnt == 0)
+			Pthread_cond_signal(&cond_empty);
+
+		/* Update consumer index. */
+		if (cons_index == NITEMS - 1)
+			cons_index = 0;
+		else
+			cons_index++;
+
+		/* Release mutex lock. */
+		Pthread_mutex_unlock(&mutex);
+		fprintf(stdout, "Received request.\n");
+		/* Process the client request */
+		proc_request(info->connfd, &info->addr, info->logger);
+		Close(info->connfd);
+	}
+	Free(arg);
+	Free(info);
+	return NULL;
+}
+
+/* Requires:
+ *     A valid connfd, client address info, and logger.
+ *
+ * Effects:
+ *     Process the request from the client, forward the request to the server
+ *     and send response back to the client.
+ */
+void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
+{
+	rio_t rio;
+	rio_t rio_sv;
+	char *hostname;
+	char *port;
+	char *pathname;
+	long n2;
+	int n;
+	int nbytes;
+	int serverfd;
+
+	size_t requestlen = 0;
+
+	/*Allocate buf to read line, and request to store the full request.*/
+	char *buf = malloc(MAXLINE * sizeof(char));
+	if (buf == NULL)
+	{
+		Sio_puts("Out of memory. \n");
+		Free(buf);
+		_exit(1);
+	}
+	memset(buf, '\0', MAXLINE * sizeof(char));
+
+	char *request = malloc(MAXLINE * sizeof(char));
+	if (request == NULL)
+	{
+		Sio_puts("Out of memory. \n");
+		Free(buf);
+		Free(request);
+		_exit(1);
+	}
+	memset(request, '\0', MAXLINE * sizeof(char));
+
+	rio_readinitb(&rio, connfd);
+
+	/* Read the request line by line. */
+	if ((n = rio_readlineb_wrapper(&rio, &buf, MAXLINE)) > 0)
+	{
+
+		int buffer_size = (int)strlen(buf);
+		char method[buffer_size];
+		char uri[buffer_size];
+		char version[buffer_size];
+		char getline[buffer_size];
+
+		sscanf(buf, "%s %s %s ", method, uri, version);
+		if (strcasecmp(method, "GET"))
+		{
+			client_error(connfd, method, 501, "Not Implemented",
+			    "Proxy does not implement this method");
+			Free(buf);
+			Free(request);
+			return;
+		}
+
+		if (strcmp(version, "HTTP/1.1") && strcmp(version, "HTTP/1.0"))
+		{
+			client_error(connfd, version, 505, 
+			    "HTTP Version Not Supported",
+			    "Client requested an unsupported protocol version");
+			Free(buf);
+			Free(request);
+			return;
+		}
+
+		/* Parse uri. */
+		if (parse_uri(uri, &hostname, &port, &pathname) == -1)
+		{
+			client_error(connfd, uri, 400, "Bad Request",
+			    "Client requested a malformed URI");
+			Free(buf);
+			Free(request);
+			return;
+		}
+
+		printf("Hostname: %s \n", hostname);
+		printf("Port: %s \n", port);
+
+		/*GET line to write to the end server.*/
+		snprintf(getline, buffer_size, "%s %s %s\r\n", method, 
+		    pathname, version);
+
+		requestlen += strlen(getline);
+		if (requestlen > strlen(request))
+			request = realloc(request, requestlen + 1);
+		strcat(request, getline);
+
+		printf("URI line is : %s \n", buf);
+		printf("Start to parse headers \n");
+
+		/*Call the wrapper to read lines and pass by reference.*/
+		while ((nbytes = rio_readlineb_wrapper(&rio, &buf, MAXLINE)) > 
+		    0)
+		{
+			if (strcmp(buf, "\r\n") == 0)
+			{
+				printf("End of header section.\n");
+				break;
+			}
+			else
+			{
+				/* Skip this header. */
+				if ((strncmp(buf, "Connection", 10) == 0) |
+				    (strncmp(buf, "Keep-Alive", 10) == 0) |
+				    (strncmp(buf, "Proxy-Connection", 16) == 0))
+				{
+					continue;
+				}
+				else
+				{
+					requestlen += strlen(buf);
+					if (requestlen > strlen(request))
+					{
+						request = realloc(request, 
+						    requestlen + 1);
+					}
+					strcat(request, buf);
+				}
+			}
+		}
+
+		if (strncmp(version, "HTTP/1.1", 8) == 0)
+		{
+			requestlen += strlen("Connection: close\r\n");
+			if (requestlen > strlen(request))
+				request = realloc(request, requestlen + 1);
+			strcat(request, "Connection: close\r\n");
+		}
+
+		requestlen += strlen("\r\n");
+		if (requestlen > strlen(request))
+			request = realloc(request, requestlen + 1);
+		strcat(request, "\r\n");
+
+		// printf("Request is : %s \n", request);
+
+		/* Connect to the server. */
+		if ((serverfd = open_clientfd(hostname, port)) < 0)
+		{
+			client_error(connfd, hostname, 504, "Gateway Timeout",
+			    "Unrecognized host name or port");
+			fprintf(stderr, "Error connecting to server\n");
+			Free(buf);
+			Free(request);
+			Free(hostname);
+			Free(port);
+			Free(pathname);
+			return;
+		}
+		fprintf(stdout, "Successfully connect to the server!\n");
+
+		/* Forward request to the server. */
+		rio_readinitb(&rio_sv, serverfd);
+		if ((rio_writen(serverfd, request, strlen(request))) < 0)
+		{
+			client_error(connfd, hostname, 504, "Gateway Timeout",
+			    "Error sending headers to");
+			fprintf(stderr, "Error in writing headers to server!\n"
+			    );
+			fprintf(stderr, "Error is in closing line. \n");
+			Free(buf);
+			Free(request);
+			Free(hostname);
+			Free(port);
+			Free(pathname);
+			return;
+		}
+
+		Free(buf);
+		Free(request);
+
+		long size = 0;
+		char *server_buf = malloc((MAXLINE + 64) * sizeof(char));
+		if (server_buf == NULL)
+		{
+			Sio_puts("Out of memory");
+
+			Free(server_buf);
+			Free(hostname);
+			Free(port);
+			Free(pathname);
+			exit(1);
+		}
+		/* Read from the server and write back to the client. */
+		while ((n2 = rio_readnb(&rio_sv, server_buf, MAXLINE)) > 0)
+		{
+			size += n2;
+			if (rio_writen(connfd, server_buf, n2) < 0)
+			{
+				client_error(connfd, "client", 504,
+				    "Gateway Timeout", 
+				    "Error sending response to");
+				fprintf(stderr, 
+				    "Error sending request to client\n");
+
+				Free(server_buf);
+				Free(hostname);
+				Free(port);
+				Free(pathname);
+				return;
+			}
+		}
+
+		Free(server_buf);
+
+		rio_writen(connfd, "\r\n", 2);
+
+		if ((n2 < 0))
+		{
+			fprintf(stderr, 
+			    "Error reading response from end server\n");
+			client_error(connfd, hostname, 504, "Gateway Timeout",
+			    "Error reading from");
+			Free(hostname);
+			Free(port);
+			Free(pathname);
+			return;
+		}
+		else if (size == 0)
+		{
+			Free(hostname);
+			Free(port);
+			Free(pathname);
+			return;
+		}
+		/* Create log message. */
+		char *log_msg = create_log_entry(clientaddr, uri, size);
+		printf("%s\n", log_msg);
+		fprintf(logger, "%s\n", log_msg);
+		fflush(logger);
+
+		Free(hostname);
+		Free(port);
+		Free(pathname);
+		Free(log_msg);
+
+		Close(serverfd);
+	}
+
+	else
+	{
+		client_error(connfd, "client", 504, "Gateway Timeout",
+		    "Error reading request from");
+		Free(buf);
+		Free(request);
+		return;
+	}
+}
+
+/*
+ * Requires:
+ * 	 bufp points to a valid char pointer.
+ *
+ * Effects:
+ *   Read a line from rp that may exceed length maxsize.Return the length
+ *   of the line if success, -1 o.w.
+ */
+static int
+rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize)
+{
+	int n_count = 0;
+	int n_read;
+	char *linebrk;
+	char buf_new[maxsize];
+
+	/*Clean the allocated buffer.*/
+	memset(*bufp, '\0', strlen(*bufp));
+	memset(buf_new, '\0', sizeof(buf_new));
+
+	/*Use buf_new as a temp buffer to store the read.*/
+	if ((n_read = rio_readlineb(rp, buf_new, maxsize)) < 0)
+	{
+		fprintf(stderr, "Error reading request client\n");
+		return (-1);
+	}
+	else
+	{
+		n_count += n_read;
+		strcat(*bufp, buf_new);
+
+		/*Read until the end of line ("\r\n").*/
+		while ((linebrk = strstr(*bufp, "\r\n")) == NULL)
+		{
+			
+			if ((n_read = rio_readlineb(rp, buf_new, maxsize)) < 0)
+			{
+				fprintf(stderr, 
+				    "Error reading request client\n");
+				return (-1);
+			}
+
+			/*Increment the count and reallocate if necessary.*/
+			n_count += n_read;
+			if ((size_t)n_count > strlen(*bufp))
+			{
+				*bufp = (char *)realloc((*bufp), n_count + 1);
+			}
+			strcat(*bufp, buf_new);
+
+		}
+	}
+
+	/*Return the total bytes read.*/
+	return (n_count);
 }
 
 /*
@@ -70,13 +554,16 @@ parse_uri(const char *uri, char **hostnamep, char **portp, char **pathnamep)
 	*hostnamep = hostname;
 
 	/* Look for a port number.  If none is found, use port 80. */
-	if (*host_end == ':') {
+	if (*host_end == ':')
+	{
 		port_begin = host_end + 1;
 		port_end = strpbrk(port_begin, "/ \r\n");
 		if (port_end == NULL)
 			port_end = port_begin + strlen(port_begin);
 		len = port_end - port_begin;
-	} else {
+	}
+	else
+	{
 		port_begin = "80";
 		port_end = host_end;
 		len = 2;
@@ -87,13 +574,16 @@ parse_uri(const char *uri, char **hostnamep, char **portp, char **pathnamep)
 	*portp = port;
 
 	/* Extract the path. */
-	if (*port_end == '/') {
+	if (*port_end == '/')
+	{
 		pathname_begin = port_end;
 		const char *pathname_end = strpbrk(pathname_begin, " \r\n");
 		if (pathname_end == NULL)
 			pathname_end = pathname_begin + strlen(pathname_begin);
 		len = pathname_end - pathname_begin;
-	} else {
+	}
+	else
+	{
 		pathname_begin = "/";
 		len = 1;
 	}
@@ -160,7 +650,7 @@ create_log_entry(const struct sockaddr_in *sockaddr, const char *uri, int size)
 /*
  * Requires:
  *   The parameter "fd" must be an open socket that is connected to the client.
- *   The parameters "cause", "short_msg", and "long_msg" must point to properly 
+ *   The parameters "cause", "short_msg", and "long_msg" must point to properly
  *   NUL-terminated strings that describe the reason why the HTTP transaction
  *   failed.  The string "short_msg" may not exceed 32 characters in length,
  *   and the string "long_msg" may not exceed 80 characters in length.
@@ -173,7 +663,7 @@ create_log_entry(const struct sockaddr_in *sockaddr, const char *uri, int size)
  */
 static void
 client_error(int fd, const char *cause, int err_num, const char *short_msg,
-    const char *long_msg)
+			 const char *long_msg)
 {
 	char body[MAXBUF], headers[MAXBUF], truncated_cause[2049];
 
@@ -191,25 +681,23 @@ client_error(int fd, const char *cause, int err_num, const char *short_msg,
 
 	/* Build the HTTP response body. */
 	snprintf(body, MAXBUF,
-	    "<html><title>Proxy Error</title><body bgcolor=""ffffff"">\r\n"
-	    "%d: %s\r\n"
-	    "<p>%s: %s\r\n"
-	    "<hr><em>The COMP 321 Web proxy</em>\r\n",
-	    err_num, short_msg, long_msg, truncated_cause);
+			 "<html><title>Proxy Error</title><body bgcolor="
+			 "ffffff"
+			 ">\r\n"
+			 "%d: %s\r\n"
+			 "<p>%s: %s\r\n"
+			 "<hr><em>The COMP 321 Web proxy</em>\r\n",
+			 err_num, short_msg, long_msg, truncated_cause);
 
 	/* Build the HTTP response headers. */
 	snprintf(headers, MAXBUF,
-	    "HTTP/1.0 %d %s\r\n"
-	    "Content-type: text/html\r\n"
-	    "Content-length: %d\r\n"
-	    "\r\n",
-	    err_num, short_msg, (int)strlen(body));
+			 "HTTP/1.0 %d %s\r\n"
+			 "Content-type: text/html\r\n"
+			 "Content-length: %d\r\n"
+			 "\r\n",
+			 err_num, short_msg, (int)strlen(body));
 
 	/* Write the HTTP response. */
 	if (rio_writen(fd, headers, strlen(headers)) != -1)
 		rio_writen(fd, body, strlen(body));
 }
-
-// Prevent "unused function" and "unused variable" warnings.
-static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
-    parse_uri };
