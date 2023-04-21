@@ -98,7 +98,7 @@ int main(int argc, char **argv)
 	{
 		struct sockaddr_in clientaddr;
 		socklen_t clientlen = sizeof(clientaddr);
-		// better to use sizeof struct sockaddr_in?
+		// better to use sizeof struct sockaddr_in
 
 		int connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
 		if (connfd == -1)
