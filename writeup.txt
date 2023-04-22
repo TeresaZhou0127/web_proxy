@@ -1,3 +1,4 @@
+slipday used for this assignment: 2
 COMP 321 Project 6: Web Proxy
 
 <Replace with your name(s) and NetID(s).>
