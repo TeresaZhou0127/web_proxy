@@ -51,10 +51,10 @@ void *consumer(void *arg);
 
 /*
  * Requires:
- *	 A port number is required for the proxy to start listening.
+ *	 A port number is given by the user to start listening.
  *
  * Effects:
- *   The program serves as a proxy for GET requests.
+ *   The program serves as a proxy for specifically the GET request.
  */
 int main(int argc, char **argv)
 {
@@ -65,11 +65,13 @@ int main(int argc, char **argv)
 		exit(0);
 	}
 
-	// Ignore broken pipe signals.
+	/*
+	 *Get rid of the broken pipe signals.
+	 */
+
 	Signal(SIGPIPE, SIG_IGN);
 
 	int i;
-	// pthread_t prod_tid;
 	pthread_t cons_tids[NTHREADS];
 
 	int listenfd = open_listenfd(argv[1]);
@@ -82,23 +84,23 @@ int main(int argc, char **argv)
 	/* Initialize pthread variables. */
 	Pthread_mutex_init(&mutex, NULL);
 
-	/* INITIALIZE THE CONDITION VARIABLES HERE. */
+	/* Initialize the condition variables. */
 	pthread_cond_init(&cond_empty, NULL);
 	pthread_cond_init(&cond_full, NULL);
 
-	/* Start producer and consumer threads. */
+	/* Start the producer and consumer threads. */
 	for (i = 0; i < NTHREADS; ++i)
 	{
 		Pthread_create(&cons_tids[i], NULL, consumer, NULL);
 	}
 
+    /* Open the logger file.*/
 	FILE *logger = fopen("proxy.log", "a+");
 
 	while (true)
 	{
 		struct sockaddr_in clientaddr;
 		socklen_t clientlen = sizeof(clientaddr);
-		// better to use sizeof struct sockaddr_in
 
 		int connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
 		if (connfd == -1)
@@ -107,7 +109,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		// Allocate struct to pass into thread
+		/* Malloc struct to pass into thread. */
 		client_info *info = malloc(sizeof(client_info));
 		if (info == NULL)
 		{
@@ -121,28 +123,32 @@ int main(int argc, char **argv)
 		info->port = argv[1];
 		info->logger = logger;
 
-		/* Push info into the buffer */
+		/* Push into the buffer */
+
+		// Start the mutex lock.
 		Pthread_mutex_lock(&mutex);
 		while (shared_cnt == NITEMS)
 		{
-			/*Wait for signals from cond_empty.*/
+			/* Wait for signals to come.*/
 			Pthread_cond_wait(&cond_empty, &mutex);
 		}
+
 		buffer[prod_index] = info;
 		shared_cnt++;
+		/* Send the buffer full signal. */
 		Pthread_cond_signal(&cond_full);
 
-		/* Update producer index. */
+		/* Update the producer index. */
 		if (prod_index == NITEMS - 1)
 			prod_index = 0;
 		else
 			prod_index++;
 
-		/* Release mutex lock. */
+		// Release mutex lock.
 		Pthread_mutex_unlock(&mutex);
 	}
 
-	/* Wait for threads to finish. */
+	/* Wait for all threads to finish. */
 	for (i = 0; i < NTHREADS; ++i)
 	{
 		Pthread_join(cons_tids[i], NULL);
@@ -151,11 +157,11 @@ int main(int argc, char **argv)
 	/* Clean up. */
 	Pthread_mutex_destroy(&mutex);
 
-	/* DESTROY THE CONDITION VARIABLES HERE. */
+	/* destroy the condition variables. */
 	Pthread_cond_destroy(&cond_empty);
 	Pthread_cond_destroy(&cond_full);
 
-	/*Close the logger file*/
+	/* Close the logger file. */
 	Fclose(logger);
 
 	/* Return success. */
@@ -166,31 +172,31 @@ int main(int argc, char **argv)
  * Requires:
  *    None.
  * Effects:
- *     Read and process a client info from the buffer.
+ *     Read and process a client from the buffer.
  */
 void *consumer(void *arg)
 {
-	/*Detach the thread.*/
 	Pthread_detach(Pthread_self());
 	client_info *info;
-	int id = (int)Pthread_self();
-	printf("Started consumer %d\n", id);
+	//int id = (int)Pthread_self();
+	//printf("Started consumer %d\n", id);
 
 	while (true)
 	{
+		/* Start the mutex lock. */
 		Pthread_mutex_lock(&mutex);
 
 		while (shared_cnt == 0)
 		{
 			Pthread_cond_wait(&cond_full, &mutex);
 		}
-		/* Read from buffer */
+		/* Read from the buffer. */
 		info = buffer[cons_index];
 		shared_cnt--;
 		if (shared_cnt == 0)
 			Pthread_cond_signal(&cond_empty);
 
-		/* Update consumer index. */
+		/* Update the consumer index. */
 		if (cons_index == NITEMS - 1)
 			cons_index = 0;
 		else
@@ -199,20 +205,23 @@ void *consumer(void *arg)
 		/* Release mutex lock. */
 		Pthread_mutex_unlock(&mutex);
 		fprintf(stdout, "Received request.\n");
+
 		/* Process the client request */
 		proc_request(info->connfd, &info->addr, info->logger);
+		/* Close the connection. */
 		Close(info->connfd);
 	}
+
 	Free(arg);
 	Free(info);
 	return NULL;
 }
 
 /* Requires:
- *     A valid connfd, client address info, and logger.
+ *     A valid connfd, client address, and a logger.
  *
  * Effects:
- *     Process the request from the client, forward the request to the server
+ *     Read and process the request from the client, forward the request to the server
  *     and send response back to the client.
  */
 void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
@@ -223,13 +232,13 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 	char *port;
 	char *pathname;
 	long n2;
-	int n;
+	int n1;
 	int nbytes;
 	int serverfd;
 
 	size_t requestlen = 0;
 
-	/*Allocate buf to read line, and request to store the full request.*/
+	/* Allocate buf to read line, and request to store the full request. */
 	char *buf = malloc(MAXLINE * sizeof(char));
 	if (buf == NULL)
 	{
@@ -251,8 +260,8 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 
 	rio_readinitb(&rio, connfd);
 
-	/* Read the request line by line. */
-	if ((n = rio_readlineb_wrapper(&rio, &buf, MAXLINE)) > 0)
+	/* Read the request line after line. */
+	if ((n1 = rio_readlineb_wrapper(&rio, &buf, MAXLINE)) > 0)
 	{
 
 		int buffer_size = (int)strlen(buf);
@@ -261,7 +270,10 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 		char version[buffer_size];
 		char getline[buffer_size];
 
+        /* Categorize the request message into three main parts. */
 		sscanf(buf, "%s %s %s ", method, uri, version);
+
+		/* Check the request method. */
 		if (strcasecmp(method, "GET"))
 		{
 			client_error(connfd, method, 501, "Not Implemented",
@@ -271,6 +283,7 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 			return;
 		}
 
+        /* Check the version of the request. */
 		if (strcmp(version, "HTTP/1.1") && strcmp(version, "HTTP/1.0"))
 		{
 			client_error(connfd, version, 505, 
@@ -281,7 +294,7 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 			return;
 		}
 
-		/* Parse uri. */
+		/* Parse the uri. */
 		if (parse_uri(uri, &hostname, &port, &pathname) == -1)
 		{
 			client_error(connfd, uri, 400, "Bad Request",
@@ -292,9 +305,8 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 		}
 
 		printf("Hostname: %s \n", hostname);
-		printf("Port: %s \n", port);
+		// printf("Port: %s \n", port);
 
-		/*GET line to write to the end server.*/
 		snprintf(getline, buffer_size, "%s %s %s\r\n", method, 
 		    pathname, version);
 
@@ -306,7 +318,7 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 		printf("URI line is : %s \n", buf);
 		printf("Start to parse headers \n");
 
-		/*Call the wrapper to read lines and pass by reference.*/
+		/* Call the wrapper function below to read lines. */
 		while ((nbytes = rio_readlineb_wrapper(&rio, &buf, MAXLINE)) > 
 		    0)
 		{
@@ -317,7 +329,7 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 			}
 			else
 			{
-				/* Skip this header. */
+				/* Skip these headers to prevent failure. */
 				if ((strncmp(buf, "Connection", 10) == 0) |
 				    (strncmp(buf, "Keep-Alive", 10) == 0) |
 				    (strncmp(buf, "Proxy-Connection", 16) == 0))
@@ -357,7 +369,7 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 		{
 			client_error(connfd, hostname, 504, "Gateway Timeout",
 			    "Unrecognized host name or port");
-			fprintf(stderr, "Error connecting to server\n");
+			fprintf(stderr, "Error connecting to the server\n");
 			Free(buf);
 			Free(request);
 			Free(hostname);
@@ -365,9 +377,9 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 			Free(pathname);
 			return;
 		}
-		fprintf(stdout, "Successfully connect to the server!\n");
+		fprintf(stdout, "Successfully connect to the server.\n");
 
-		/* Forward request to the server. */
+		/* Forward the request to the server. */
 		rio_readinitb(&rio_sv, serverfd);
 		if ((rio_writen(serverfd, request, strlen(request))) < 0)
 		{
@@ -399,6 +411,7 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 			Free(pathname);
 			exit(1);
 		}
+
 		/* Read from the server and write back to the client. */
 		while ((n2 = rio_readnb(&rio_sv, server_buf, MAXLINE)) > 0)
 		{
@@ -441,7 +454,8 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
 			Free(pathname);
 			return;
 		}
-		/* Create log message. */
+
+		/* Generate the log message and write to the log file. */
 		char *log_msg = create_log_entry(clientaddr, uri, size);
 		printf("%s\n", log_msg);
 		fprintf(logger, "%s\n", log_msg);
@@ -470,8 +484,8 @@ void proc_request(int connfd, struct sockaddr_in *clientaddr, FILE *logger)
  * 	 bufp points to a valid char pointer.
  *
  * Effects:
- *   Read a line from rp that may exceed length maxsize.Return the length
- *   of the line if success, -1 o.w.
+ *   Read a line from rp that may exceed the maxsize length. 
+ *   Return the number of bytes read if success or return -1 if fails.
  */
 static int
 rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize)
@@ -481,11 +495,10 @@ rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize)
 	char *linebrk;
 	char buf_new[maxsize];
 
-	/*Clean the allocated buffer.*/
 	memset(*bufp, '\0', strlen(*bufp));
 	memset(buf_new, '\0', sizeof(buf_new));
 
-	/*Use buf_new as a temp buffer to store the read.*/
+	/* Use buf_new as a new buffer to store the temp read. */
 	if ((n_read = rio_readlineb(rp, buf_new, maxsize)) < 0)
 	{
 		fprintf(stderr, "Error reading request client\n");
@@ -496,7 +509,6 @@ rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize)
 		n_count += n_read;
 		strcat(*bufp, buf_new);
 
-		/*Read until the end of line ("\r\n").*/
 		while ((linebrk = strstr(*bufp, "\r\n")) == NULL)
 		{
 			
@@ -507,7 +519,7 @@ rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize)
 				return (-1);
 			}
 
-			/*Increment the count and reallocate if necessary.*/
+			/* Add to the count and reallocate if necessary. */
 			n_count += n_read;
 			if ((size_t)n_count > strlen(*bufp))
 			{
@@ -518,7 +530,7 @@ rio_readlineb_wrapper(rio_t *rp, char **bufp, int maxsize)
 		}
 	}
 
-	/*Return the total bytes read.*/
+	/* Return the number of bytes read. */
 	return (n_count);
 }
 
