@@ -1,7 +1,7 @@
 slipday used for this assignment: 2
 COMP 321 Project 6: Web Proxy
 
-<Replace with your name(s) and NetID(s).>
+<Yuewei Zhou yz162; Yingtong Zhou yz178>
 
 ---(Do not write lines of text that exceed the width of this line.)------------
 
@@ -50,13 +50,18 @@ Please answer the following questions about the design of your proxy.
 
 6. How many threads did your proxy use to implement concurrency?  Explain how
    you chose this number.  (3-6 sentences)
-   We use 10 threads to implement our concurrency. 
+   We use 10 threads to implement our concurrency. In order to deal with 
+   multiple requests concurrently, we implement multiple threads, each 
+   handling one request. However, considering creating too many threads can
+   be expensive so we choose a number that is enough for our proxy to handle 
+   multiple requests concurrently but also will not cost too much. As a result,
+   we chose 10 as our final number. 
 
 7. How did you write to the access log file?  (1-2 sentences)
-   We write to the log file by using the function "create_log_entry" to get  
-   log_msg. We then use the function "fprintf" to send the log_msg to the our 
-   logger and last use "fflush" to make sure that everything in the message 
-   has been written to the log file. 
+   We first use the function "create_log_entry" to get the log_msg. We then use 
+   the function "fprintf" to send the log_msg to the our logger and last use 
+   "fflush" to make sure that everything in the message has been written to the 
+   log file. 
 
 8. How do you ensure atomicity when writing to the access log file?
    (1-2 sentences)
