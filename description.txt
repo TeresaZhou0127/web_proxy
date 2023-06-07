@@ -1,0 +1,1 @@
+A web proxy that forward requests from the client to the end server and send the response from the server back to the client. 
