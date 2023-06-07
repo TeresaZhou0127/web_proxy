@@ -1,9 +1,7 @@
 /*
- * COMP 321 Project 6: Web Proxy
+ * A Web Proxy
  *
  * This program implements a multithreaded HTTP proxy.
- *
- * <Yuewei Zhou yz162; Yingtong Zhou, yz178>
  */
 
 #include <assert.h>
